@@ -166,6 +166,16 @@ abstract class GearmanManager {
     protected $do_all_count = 0;
 
     /**
+     * Maximum time a worker will run
+     */
+    protected $max_run_time = 3600;
+
+    /**
+     * Maximum number of jobs this worker will do before quitting
+     */
+    protected $max_job_count = 0;
+
+    /**
      * Maximum job iterations per worker
      */
     protected $max_runs_per_worker = null;
@@ -174,11 +184,6 @@ abstract class GearmanManager {
      * Number of times this worker has run a job
      */
     protected $job_execution_count = 0;
-
-    /**
-     * Maximum time a worker will run
-     */
-    protected $max_run_time = 3600;
 
     /**
      * Servers that workers connect to
@@ -390,6 +395,10 @@ abstract class GearmanManager {
             $this->config['max_worker_lifetime'] = (int)$opts['x'];
         }
 
+        if (isset($opts['r'])) {
+            $this->config['max_runs_per_worker'] = (int)$opts['r'];
+        }
+
         if (isset($opts['D'])) {
             $this->config['count'] = (int)$opts['D'];
         }
@@ -556,7 +565,7 @@ abstract class GearmanManager {
 
    /**
     *   Opens the logfile.  Will assign to $this->log_file_handle
-    *   
+    *
     *    @param   string    $file     The config filename.
     *
     */
@@ -569,7 +578,6 @@ abstract class GearmanManager {
             $this->show_help("Could not open log file $file");
         }
     }
-
 
     /**
      * Parses the config file
@@ -654,26 +662,33 @@ abstract class GearmanManager {
                         $this->functions[$function]['is_independent'] = false;
                     }
 
-                    $min_count = max($this->do_all_count, 1);
-                    if(!empty($this->config['functions'][$function]['count'])){
-                        $min_count = max($this->config['functions'][$function]['count'], $this->do_all_count);
-                    }
+                    if(!empty($this->config['functions'][$function]['dedicated_only'])){
 
-                    if (!empty($this->config['functions'][$function]['independent_count'])) {
-                        $ded_count = $this->config['functions'][$function]['independent_count'];
-                        $this->functions[$function]['is_independent'] = true;
-                    } elseif(!empty($this->config['functions'][$function]['dedicated_count'])){
-                        $ded_count = $this->do_all_count + $this->config['functions'][$function]['dedicated_count'];
-                    } elseif(!empty($this->config["dedicated_count"])){
-                        $ded_count = $this->do_all_count + $this->config["dedicated_count"];
-                    } else {
-                        $ded_count = $min_count;
-                    }
+                        if(empty($this->config['functions'][$function]['dedicated_count'])){
+                            $this->log("Invalid configuration for dedicated_count for function $function.", GearmanManager::LOG_LEVEL_PROC_INFO);
+                            exit();
+                        }
 
-                    if ($this->functions[$function]['is_independent']) {
-                        $this->functions[$function]['count'] = $ded_count;
+                        $this->functions[$function]['dedicated_only'] = true;
+                        $this->functions[$function]["count"] = $this->config['functions'][$function]['dedicated_count'];
+
                     } else {
+
+                        $min_count = max($this->do_all_count, 1);
+                        if(!empty($this->config['functions'][$function]['count'])){
+                            $min_count = max($this->config['functions'][$function]['count'], $this->do_all_count);
+                        }
+
+                        if(!empty($this->config['functions'][$function]['dedicated_count'])){
+                            $ded_count = $this->do_all_count + $this->config['functions'][$function]['dedicated_count'];
+                        } elseif(!empty($this->config["dedicated_count"])){
+                            $ded_count = $this->do_all_count + $this->config["dedicated_count"];
+                        } else {
+                            $ded_count = $min_count;
+                        }
+
                         $this->functions[$function]["count"] = max($min_count, $ded_count);
+
                     }
 
                     $this->functions[$function]['path'] = $file;
@@ -688,12 +703,22 @@ abstract class GearmanManager {
                     
                     $this->functions[$function]['priority'] = $priority;
 
-                    // we don't want independent function to be registered with the regular functions
-                    if ($this->functions[$function]['is_independent']) {
-                        $this->independent_function_names[] = $function;
+                    /**
+                     * Note about priority. This exploits an undocumented feature
+                     * of the gearman daemon. This will only work as long as the
+                     * current behavior of the daemon remains the same. It is not
+                     * a defined part fo the protocol.
+                     */
+                    if(!empty($this->config['functions'][$function]['priority'])){
+                        $priority = max(min(
+                            $this->config['functions'][$function]['priority'],
+                            self::MAX_PRIORITY), self::MIN_PRIORITY);
                     } else {
-                        $this->function_names[] = $function;
+                        $priority = 0;
                     }
+
+                    $this->functions[$function]['priority'] = $priority;
+
                 }
             }
         }
@@ -800,8 +825,10 @@ abstract class GearmanManager {
                 $this->start_worker();
             }
 
-            foreach($this->function_names as $worker){
-                $this->function_count[$worker] = $this->do_all_count;
+            foreach($this->functions as $worker => $settings){
+                if(empty($settings["dedicated_only"])){
+                    $function_count[$worker] = $this->do_all_count;
+                }
             }
 
         }
@@ -849,6 +876,22 @@ abstract class GearmanManager {
 
     protected function start_worker($worker="all") {
 
+        static $all_workers;
+
+        if($worker == "all"){
+            if(is_null($all_workers)){
+                $all_workers = array();
+                foreach($this->functions as $func=>$settings){
+                    if(empty($settings["dedicated_only"])){
+                        $all_workers[] = $func;
+                    }
+                }
+            }
+            $worker_list = $all_workers;
+        } else {
+            $worker_list = array($worker);
+        }
+
         $pid = pcntl_fork();
 
         switch($pid) {
@@ -862,8 +905,15 @@ abstract class GearmanManager {
                 $this->pid = getmypid();
 
                 if($worker == "all"){
+
+                    $worker_list = array_keys($this->functions);
+
                     // shuffle the list to avoid queue preference
-                    $worker_list = $this->shuffle_and_sort($this->function_names);
+                    shuffle($worker_list);
+
+                    // sort the shuffled array by priority
+                    uasort($worker_list, array($this, "sort_priority"));
+
                 } else {
                     $worker_list = array($worker);
                 }
@@ -886,25 +936,26 @@ abstract class GearmanManager {
             default:
 
                 // parent
-                $this->log("Started child $pid ($worker)", GearmanManager::LOG_LEVEL_PROC_INFO);
+                $this->log("Started child $pid (".implode(",", $worker_list).")", GearmanManager::LOG_LEVEL_PROC_INFO);
                 $this->children[$pid] = $worker;
         }
 
     }
 
-    function shuffle_and_sort($array) {
-        shuffle($array);
-        usort($array, array($this, 'compare_priority'));
-
-        return $array;
-    }
-    
-    function compare_priority($a, $b)
-    {
-        if ($this->functions[$a]['priority'] == $this->functions[$b]['priority']) {
+    /**
+     * Sorts the function list by priority
+     */
+    private function sort_priority($a, $b) {
+        if(!isset($a["priority"])){
+            $a["priority"] = 0;
+        }
+        if(!isset($b["priority"])){
+            $b["priority"] = 0;
+        }
+        if ($a["priority"] == $b["priority"]) {
             return 0;
         }
-        return ($this->functions[$a]['priority'] > $this->functions[$b]['priority']) ? -1 : 1;
+        return ($a["priority"] > $b["priority"]) ? -1 : 1;
     }
 
     /**
@@ -1009,8 +1060,9 @@ abstract class GearmanManager {
             $init = true;
 
             if($this->log_file_handle){
-                $ds = date("Y-m-d H:i:s");
-                fwrite($this->log_file_handle, "Date                  PID   Type   Message\n");
+                list($ts, $ms) = explode(".", sprintf("%f", microtime(true)));
+                $ds = date("Y-m-d H:i:s").".".str_pad($ms, 6, 0);
+                fwrite($this->log_file_handle, "Date                         PID   Type   Message\n");
             } else {
                 echo "PID   Type   Message\n";
             }
@@ -1041,7 +1093,8 @@ abstract class GearmanManager {
         $log_pid = str_pad($this->pid, 5, " ", STR_PAD_LEFT);
 
         if($this->log_file_handle){
-            $ds = date("Y-m-d H:i:s");
+            list($ts, $ms) = explode(".", sprintf("%f", microtime(true)));
+            $ds = date("Y-m-d H:i:s").".".str_pad($ms, 6, 0);
             $prefix = "[$ds] $log_pid $label";
             fwrite($this->log_file_handle, $prefix." ".str_replace("\n", "\n$prefix ", trim($message))."\n");
         } else {

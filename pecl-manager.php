@@ -71,6 +71,11 @@ class GearmanPeclManager extends GearmanManager {
                 $this->stop_work = true;
             }
 
+            if(!empty($this->config["max_runs_per_worker"]) && $this->job_execution_count >= $this->config["max_runs_per_worker"]) {
+                $this->log("Ran $this->job_execution_count jobs which is over the maximum({$this->config['max_runs_per_worker']}), exiting", GearmanManager::LOG_LEVEL_WORKER_INFO);
+                $this->stop_work = true;
+            }
+
         }
 
         $thisWorker->unregisterAll();
@@ -185,10 +190,6 @@ class GearmanPeclManager extends GearmanManager {
         settype($result, $type);
 
         $this->job_execution_count++;
-        if(isset($this->max_runs_per_worker) && $this->job_execution_count >= $this->max_runs_per_worker) {
-            $this->log("Ran $this->job_execution_count jobs which is over the maximum($this->max_runs_per_worker), exiting", GearmanManager::LOG_LEVEL_WORKER_INFO);
-            $this->stop_work = true;
-        }
 
         return $result;
 

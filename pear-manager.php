@@ -89,8 +89,8 @@ class GearmanPearManager extends GearmanManager {
 
         $this->log("Worker's last job $time seconds ago", GearmanManager::LOG_LEVEL_CRAZY);
 
-        if(isset($this->max_runs_per_worker) && $this->job_execution_count >= $this->max_runs_per_worker) {
-            $this->log("Ran $this->job_execution_count jobs which is over the maximum($this->max_runs_per_worker), exiting", GearmanManager::LOG_LEVEL_WORKER_INFO);
+        if(!empty($this->config["max_runs_per_worker"]) && $this->job_execution_count >= $this->config["max_runs_per_worker"]) {
+            $this->log("Ran $this->job_execution_count jobs which is over the maximum({$this->config['max_runs_per_worker']}), exiting", GearmanManager::LOG_LEVEL_WORKER_INFO);
             $this->stop_work = true;
         }
 
