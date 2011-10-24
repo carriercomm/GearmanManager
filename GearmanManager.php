@@ -191,24 +191,9 @@ abstract class GearmanManager {
     protected $servers = array();
 
     /**
-     * Keep track of how many functions we are kicking off
-     */
-    protected $function_count = array();
-
-    /**
      * List of functions available for work
      */
     protected $functions = array();
-
-    /**
-     * Workers that are included in the general pool
-     */
-    protected $function_names = array();
-
-    /**
-     * Workers that get their own process and are not in the pool
-     */
-    protected $independent_function_names = array();
 
     /**
      * Function/Class prefix
@@ -387,10 +372,6 @@ abstract class GearmanManager {
             $this->config['worker_dir'] = $opts['w'];
         }
 
-        if(isset($opts["r"])){
-            $this->max_runs_per_worker = max(1, (int)$opts["r"]);
-        }
-
         if (isset($opts['x'])) {
             $this->config['max_worker_lifetime'] = (int)$opts['x'];
         }
@@ -519,10 +500,6 @@ abstract class GearmanManager {
         }
         unset($dir);
 
-        if(!empty($this->config['max_runs_per_worker'])) {
-            $this->max_runs_per_worker = max(1, (int)$this->config['max_runs_per_worker']);
-        }
-
         if(!empty($this->config['max_worker_lifetime'])){
             $this->max_run_time = (int)$this->config['max_worker_lifetime'];
         }
@@ -562,6 +539,7 @@ abstract class GearmanManager {
         }
 
     }
+
 
    /**
     *   Opens the logfile.  Will assign to $this->log_file_handle
@@ -659,7 +637,6 @@ abstract class GearmanManager {
 
                     if(!isset($this->functions[$function])){
                         $this->functions[$function] = array();
-                        $this->functions[$function]['is_independent'] = false;
                     }
 
                     if(!empty($this->config['functions'][$function]['dedicated_only'])){
@@ -692,16 +669,6 @@ abstract class GearmanManager {
                     }
 
                     $this->functions[$function]['path'] = $file;
-                    
-                    if(!empty($this->config['functions'][$function]['priority'])){
-                        $priority = max(min(
-                            $this->config['functions'][$function]['priority'],
-                            self::MAX_PRIORITY), self::MIN_PRIORITY);
-                    } else {
-                        $priority = 0;
-                    }
-                    
-                    $this->functions[$function]['priority'] = $priority;
 
                     /**
                      * Note about priority. This exploits an undocumented feature
@@ -815,6 +782,8 @@ abstract class GearmanManager {
      */
     protected function bootstrap() {
 
+        $function_count = array();
+
         /**
          * If we have "do_all" workers, start them first
          * do_all workers register all functions
@@ -834,36 +803,22 @@ abstract class GearmanManager {
         }
 
         /**
-         * Now start up workers that are independent at a certain limit
+         * Next we loop the workers and ensure we have enough running
+         * for each worker
          */
-        $this->ensure_correct_numworkers_started($this->independent_function_names);
+        foreach($this->functions as $worker=>$config) {
 
-        /**
-         * Next loop the normal workers and ensure we have enough running
-         */
-        $this->ensure_correct_numworkers_started($this->function_names);
-
-        /**
-         * Set the last code check time to now since we just loaded all the code
-         */
-        $this->last_check_time = time();
-
-    }
-
-    /**
-     * Loop through the functions passed in, and ensure we have the proper number running
-     */
-    protected function ensure_correct_numworkers_started($function_names) {
-        foreach($function_names as $worker) {
-            $config = $this->functions[$worker];
-
-            if(empty($this->function_count[$worker])){
-                $this->function_count[$worker] = 0;
+            /**
+             * If we don't have do_all workers, this won't be set, so we need
+             * to init it here
+             */
+            if(empty($function_count[$worker])){
+                $function_count[$worker] = 0;
             }
 
-            while($this->function_count[$worker] < $config["count"]){
+            while($function_count[$worker] < $config["count"]){
                 $this->start_worker($worker);
-                $this->function_count[$worker]++;
+                $function_count[$worker]++;;
             }
 
             /**
@@ -872,6 +827,12 @@ abstract class GearmanManager {
             usleep(50000);
 
         }
+
+        /**
+         * Set the last code check time to now since we just loaded all the code
+         */
+        $this->last_check_time = time();
+
     }
 
     protected function start_worker($worker="all") {

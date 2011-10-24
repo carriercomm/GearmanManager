@@ -189,6 +189,7 @@ class GearmanPeclManager extends GearmanManager {
         $type = gettype($result);
         settype($result, $type);
 
+
         $this->job_execution_count++;
 
         return $result;
