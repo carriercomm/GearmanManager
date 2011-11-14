@@ -79,6 +79,11 @@ abstract class GearmanManager {
     protected $stop_work = false;
 
     /**
+     * When true, workers will stop but parent process will not die
+     */
+    protected $pause_work = false;
+
+    /**
      * The timestamp when the signal was received to stop working
      */
     protected $stop_time = 0;
@@ -178,7 +183,7 @@ abstract class GearmanManager {
     /**
      * Maximum job iterations per worker
      */
-    protected $max_runs_per_worker = null;
+    protected $max_runs_per_worker = 1;
 
     /**
      * Number of times this worker has run a job
@@ -296,7 +301,7 @@ abstract class GearmanManager {
                 $worker = $this->children[$exited];
                 unset($this->children[$exited]);
                 $this->log("Child $exited exited ($worker)", GearmanManager::LOG_LEVEL_PROC_INFO);
-                if(!$this->stop_work){
+                if(!$this->stop_work && !$this->pause_work){
                     $this->start_worker($worker);
                 }
             }
@@ -992,7 +997,14 @@ abstract class GearmanManager {
                     if ($this->log_file) {
                         $this->open_log_file($this->log_file);
                     }
-                    $this->stop_children();
+
+                    // Temporarily turn off starting any new workers without stoping the while loop
+                    $this->pause_work = true;
+
+                    $this->stop_children(SIGHUP);
+
+                    // Turn ability to start workers back on
+                    $this->pause_work = false;
                     break;
                 default:
                 // handle all other signals

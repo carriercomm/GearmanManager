@@ -42,12 +42,21 @@ class GearmanPeclManager extends GearmanManager {
         foreach($worker_list as $w){
             $this->log("Adding job $w", GearmanManager::LOG_LEVEL_WORKER_INFO);
             $thisWorker->addFunction($w, array($this, "do_job"), $this);
+            // Override max run time for long-lived dedicated workers
+            if(isset($this->config['functions'][$w]['max_run_time_per_worker'])) {
+                $this->max_run_time = $this->config['functions'][$w]['max_run_time_per_worker'];
+            }
+            if(!empty($this->config['functions'][$w]["dedicated_only"]) &&
+                !empty($this->config['functions'][$w]["dedicated_count"]) &&
+                $this->config['functions'][$w]["dedicated_count"] > 0 &&
+                !empty($this->config['functions'][$w]["max_runs_per_worker"])) {
+                    $this->max_runs_per_worker = $this->config['functions'][$w]["max_runs_per_worker"];
+            }
         }
 
         $start = time();
 
         while(!$this->stop_work){
-
             if(@$thisWorker->work() ||
                $thisWorker->returnCode() == GEARMAN_IO_WAIT ||
                $thisWorker->returnCode() == GEARMAN_NO_JOBS) {
@@ -70,17 +79,11 @@ class GearmanPeclManager extends GearmanManager {
                 $this->log("Been running too long, exiting", GearmanManager::LOG_LEVEL_WORKER_INFO);
                 $this->stop_work = true;
             }
-
-            if(!empty($this->config["max_runs_per_worker"]) && $this->job_execution_count >= $this->config["max_runs_per_worker"]) {
-                $this->log("Ran $this->job_execution_count jobs which is over the maximum({$this->config['max_runs_per_worker']}), exiting", GearmanManager::LOG_LEVEL_WORKER_INFO);
-                $this->stop_work = true;
-            }
-
         }
 
         $thisWorker->unregisterAll();
 
-
+        
     }
 
     /**
@@ -112,7 +115,10 @@ class GearmanPeclManager extends GearmanManager {
                 return;
             }
 
-            @include $this->functions[$job_name]["path"];
+            @include_once $this->functions[$job_name]["path"];
+        }
+
+        if (empty($objects[$func])) {
 
             if(class_exists($func) && method_exists($func, "run")){
 
@@ -124,7 +130,6 @@ class GearmanPeclManager extends GearmanManager {
                 $this->log("Function $func not found");
                 return;
             }
-
         }
 
         $this->log("($h) Starting Job: $job_name", GearmanManager::LOG_LEVEL_WORKER_INFO);
@@ -189,8 +194,13 @@ class GearmanPeclManager extends GearmanManager {
         $type = gettype($result);
         settype($result, $type);
 
-
         $this->job_execution_count++;
+        if($this->job_execution_count >= $this->max_runs_per_worker) {
+                $this->log("Ran $this->job_execution_count jobs which is over the maximum(".$this->max_runs_per_worker ."), exiting", GearmanManager::LOG_LEVEL_WORKER_INFO);
+                $this->stop_work = true;
+        } else {
+                $this->log("Continuing to run the worker $w : " .  $this->job_execution_count ."/" . $this->max_runs_per_worker, GearmanManager::LOG_LEVEL_DEBUG);
+        }
 
         return $result;
 
@@ -202,7 +212,7 @@ class GearmanPeclManager extends GearmanManager {
     protected function validate_lib_workers() {
 
         foreach($this->functions as $func => $props){
-            @include $props["path"];
+            @include_once $props["path"];
             $real_func = $this->prefix.$func;
             if(!function_exists($real_func) &&
                (!class_exists($real_func) || !method_exists($real_func, "run"))){
